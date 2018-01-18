@@ -1,0 +1,338 @@
+#!/usr/local/bin/perl
+my $VERSION = "1.16"; my $AUTHOR="Prilusky"; my $YEAR="2017";
+$|++;
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use Utils;
+use File::Basename;
+use File::Copy;
+use File::Path qw(make_path remove_tree);
+use File::Spec;
+use Spreadsheet::WriteExcel;
+use YAML::XS; # $ref = YAML::XS::LoadFile($f) YAML::XS::DumpFile($f,$ref) YAML::Dump($ref)
+
+  my $binD = $FindBin::Bin;
+  my $rotD = dirname($binD);
+  my $datD = File::Spec->catfile($rotD,"dat");
+  my $docD = File::Spec->catfile($rotD,"doc");
+  my $srcD = File::Spec->catfile($rotD,"src");
+  my($verbose,$debug,$report,$update,$idsF,$fastaF);
+  my $cmdLine = join(" ",$0,@ARGV); trim(\$cmdLine);
+  while (@ARGV) { my $word = shift(@ARGV);
+    if ($word =~ /-d/i) { $debug++; next}
+    if ($word =~ /-f/i) { $fastaF = shift(@ARGV); undef $fastaF unless (-f $fastaF); next}
+    if ($word =~ /-h/i) { giveHelp(); exit; }
+    if ($word =~ /-i/i) { $idsF = shift(@ARGV); undef $idsF unless (-f $idsF); next}
+    if ($word =~ /-r/i) { $report++; next}
+    if ($word =~ /-u/i) { $update++; next}
+    if ($word =~ /-v/i) { $verbose++; next}
+    print "\n\n*** Unknown option '$word'"; giveHelp(); exit; 
+  }
+  my($all,%SUBSET); if (-f $idsF) { loadSubset($idsF,\%SUBSET); } else { $all++; }
+  my(%FASTA); loadFasta($fastaF,\%FASTA) if (-f $fastaF);
+  parseSourceFiles($srcD,$datD,$all,\%FASTA) if ($update);
+  generateReports($datD) if ($report);
+
+sub generateReports {
+  my($datD)=@_;
+  my(%H);
+  my $seqF = File::Spec->catfile($datD,"sequences.yml");
+  my $SEQ = YAML::XS::LoadFile($seqF) if (-f $seqF);
+  my @analysis = ('philius','phobius','topcons','hmmtop');
+  foreach my $type (@analysis) {
+    my $ymlF = File::Spec->catfile($datD,"${type}.yml");
+     $H{$type} = YAML::XS::LoadFile($ymlF) if (-f $ymlF);
+  }
+  foreach my $type ('cystein','transmembrane','topology') {
+    my $repF = File::Spec->catfile($datD,"${type}_Report.xls");
+    Utils::dolog("Report $type ...") if ($verbose);
+    $type->report($repF,\%H,$SEQ);
+  }
+  return;
+}
+
+sub cystein::report {
+  my($self,$repF,$H,$SEQ)=@_; 
+  my $workbook = Spreadsheet::WriteExcel->new($repF);
+  my $worksheet = $workbook->add_worksheet();
+  my ($col,$row); $col = $row = 0;
+  my @analysis = ('hmmtop','philius','polyphobius');
+  my @head = qw(SeqName HMMTOP-TotalTM HMMTOP-TMC HMMTOP-Seq Philius-TotalTM  Philius-TMC Philius-Seq PolyPhobius-TotalTM  PolyPhobius-TMC PolyPhobius-Seq );
+  foreach my $header (@head) { $worksheet->write($row,$col,$header); $col++; }
+  foreach my $seqNUM (sort keys %{$SEQ}) {
+    my $seqName = $$SEQ{$seqNUM};
+    next unless ($$H{'hmmtop'}{$seqName}{'SEQ'});
+    $row++; $col = 0;
+    $worksheet->write($row,$col,$seqName);        $col++; # Sequence
+    
+    foreach my $tool (@analysis) {
+      my $group = ($tool eq 'polyphobius') ? 'topcons' : $tool;
+      $worksheet->write($row,$col,$$H{$group}{$seqName}{'transmembrane'}{$tool}{'NUM'} || 0); $col++; # TotalTM
+      $worksheet->write($row,$col,$$H{$group}{$seqName}{'transmembrane'}{$tool}{'CYS'} || 0); $col++; # TotalTMC
+      my $seq;
+      foreach my $tmDomain ( 1 .. $$H{$group}{$seqName}{'transmembrane'}{$tool}{'NUM'}) {
+        next unless ($$H{$group}{$seqName}{'transmembrane'}{$tool}{'TM'}{$tmDomain}{'CYS'} > 0);
+        $seq .= "," if ($seq);
+        $seq .= $$H{$group}{$seqName}{'transmembrane'}{$tool}{'TM'}{$tmDomain}{'SEQ'};
+      }
+      $worksheet->write($row,$col,$seq); $col++;
+    }
+  }
+  return;
+}
+
+sub topology::report {
+  my($self,$repF,$H,$SEQ)=@_;
+  my $workbook = Spreadsheet::WriteExcel->new($repF);
+  my $worksheet = $workbook->add_worksheet();
+  my ($col,$row); $col = $row = 0;
+  my @head = qw( philius confidence phobius topcons confidence octopus philiusTC polyphobius scampi spoctopus );
+  foreach my $header ('sequence',@head) { $worksheet->write($row,$col,$header); $col++; }
+  foreach my $seqNUM (sort keys %{$SEQ}) {
+    my $seqName = $$SEQ{$seqNUM};
+    $row++; $col = 0;
+    $worksheet->write($row,$col,$seqName);        $col++; # Sequence
+    
+    $worksheet->write($row,$col,$$H{'philius'}{$seqName}{$self}{'philius'}{'LOC'}); $col++; # philius LOC
+    $worksheet->write($row,$col,$$H{'philius'}{$seqName}{$self}{'philius'}{'confidence'}); $col++; # philius confidence
+
+    $worksheet->write($row,$col,$$H{'phobius'}{$seqName}{$self}{'phobius'}{'LOC'}); $col++; # phobius LOC
+    
+    $worksheet->write($row,$col,$$H{'topcons'}{$seqName}{$self}{'topcons'}{'FST'}); $col++; # topcons FST
+    $worksheet->write($row,$col,$$H{'topcons'}{$seqName}{$self}{'topcons'}{'confidence'}); $col++; # topcons confidence
+   
+    foreach my $tool (qw(octopus philiusTC polyphobius scampi spoctopus)) {
+      $worksheet->write($row,$col,$$H{'topcons'}{$seqName}{$self}{$tool}{'FST'}); $col++; # FST
+    }
+  }
+  return;
+}
+
+sub transmembrane::report {
+  my($self,$repF,$H,$SEQ)=@_;
+  my $workbook = Spreadsheet::WriteExcel->new($repF);
+  my $worksheet = $workbook->add_worksheet();
+  my ($col,$row); $col = $row = 0;
+  my @head = qw( philius phobius topcons );
+  my @otherTools = qw(octopus philiusTC polyphobius scampi spoctopus);
+  foreach my $header ('sequence',@head,@otherTools) { $worksheet->write($row,$col,$header); $col++; }
+  foreach my $seqNUM (sort keys %{$SEQ}) {
+    my $seqName = $$SEQ{$seqNUM};
+    $row++; $col = 0;
+    $worksheet->write($row,$col,$seqName);        $col++; # Sequence
+    foreach my $tool (@head) {
+      $worksheet->write($row,$col,$$H{$tool}{$seqName}{$self}{$tool}{'NUM'}); $col++; # count TM
+    }
+    foreach my $tool (@otherTools) {
+      $worksheet->write($row,$col,$$H{'topcons'}{$seqName}{$self}{$tool}{'NUM'}); $col++; # count TM
+    }
+  }
+  return;
+}
+
+sub parseSourceFiles {
+  my($srcD,$datD,$all,$FASTA)=@_;
+  my @analysis = ('philius','phobius','topcons','hmmtop');
+#  @analysis = ('philius'); # DEBUG
+  foreach my $type (@analysis) { 
+    my $outF = File::Spec->catfile($datD,"${type}.yml");
+    my $seqF = File::Spec->catfile($datD,"sequences.yml");
+    Utils::dolog("Parse $type ...") if ($verbose);
+    $type->parse($srcD,$outF,$seqF,$all,$FASTA); # sequences from phobius file
+  }
+  return;
+}
+
+sub philius::parse {
+  my($self,$srcD,$outF,$seqF,$all,$FASTA)=@_;
+  my(%H);
+  foreach my $f (glob("$srcD/${self}*")) {
+    next unless (-f $f);
+    my $data = Utils::loadFromFile($f);
+    foreach my $blk (split(/<philiusProteinSequenceResponse>/,$data)) {
+      $blk =~ s/\s+/ /g;
+      next if ($blk =~ /\?xml\s/);
+      my($seqName) = $blk =~ /<fastaHeader>\&gt\;sp([\|\w\d]+)?\s/; 
+      print STDERR "ERR seqName $blk\n" if (!$seqName);
+      $seqName = "sp${seqName}";
+#      next unless ($seqName =~ /THI72_YEAST/); # DEBUG
+      $H{$seqName}{'SEQ'} = $$FASTA{$seqName} if ($$FASTA{$seqName});
+      $H{$seqName}{'transmembrane'}{'philius'}{'NUM'} = 0;
+      my($psa) = $blk =~ /<psa\s+(.+)?>/;
+      my($topologyConfidence) = $psa =~ /topologyConfidence=\"([\.\d]+)\"/;
+      $H{$seqName}{'topology'}{'philius'}{'confidence'} = $topologyConfidence;
+      my($theLocation,$typeStringCount,$theType);
+      # segments
+      foreach my $phSeg (split(/<philiusSegment/,$psa)) {
+        my($theType)        = $phSeg =~ /type="(\d+)"/;
+        my($typeConfidence) = $phSeg =~ /typeConfidence="([\d\.]+)"/;
+        my($typeString)     = $phSeg =~ /typeString="([\w\s\-]+)"/;
+        my($start)          = $phSeg =~ /start="(\d+)"/;
+        my($end)            = $phSeg =~ /end="(\d+)"/;
+        $H{$seqName}{'topology'}{'philius'}{'TYP'} ||= $typeString; # first one
+        if ($typeString eq 'Cytoplasmic') {
+          $H{$seqName}{'topology'}{'philius'}{'LOC'} = $typeString 
+        } elsif ($typeString eq 'Transmembrane Helix') {
+          my($startTM,$endTM) = ($start,$end);
+          $H{$seqName}{'transmembrane'}{'philius'}{'NUM'}++;
+          my $tmDomain = $H{$seqName}{'transmembrane'}{'philius'}{'NUM'};
+          $H{$seqName}{'transmembrane'}{'philius'}{'TM'}{$tmDomain}{'FROM'} = $startTM;
+          $H{$seqName}{'transmembrane'}{'philius'}{'TM'}{$tmDomain}{'TO'} = $endTM;
+          if ($H{$seqName}{'SEQ'}) {
+            $H{$seqName}{'transmembrane'}{'philius'}{'TM'}{$tmDomain}{'SEQ'} = substr($H{$seqName}{'SEQ'},$startTM - 1,$endTM - $startTM + 1);
+            $H{$seqName}{'transmembrane'}{'philius'}{'TM'}{$tmDomain}{'CYS'} = $H{$seqName}{'transmembrane'}{'philius'}{'TM'}{$tmDomain}{'SEQ'} =~ tr/C/C/;
+            $H{$seqName}{'transmembrane'}{'philius'}{'CYS'} += ($H{$seqName}{'transmembrane'}{'philius'}{'TM'}{$tmDomain}{'CYS'} > 0);
+         }
+       }
+      }
+    } 
+  }
+#    print YAML::XS::Dump(\%H); exit; # DEBUG
+  YAML::XS::DumpFile($outF,\%H);
+  return;
+}
+
+sub phobius::parse {
+  my($self,$srcD,$outF,$seqF,$all,$FASTA)=@_;
+  my(%H,%SEQ,$num);
+  foreach my $f (glob("$srcD/${self}*")) {
+    next unless (-f $f);
+    local(*IN); open(IN,$f);
+    my($seqName);
+    while(my $l = <IN>) {
+      if ($l =~ /^ID/) {
+        $l =~ s/\s+$//; (undef,$seqName) = split(/\s+/,$l); 
+        $num = sprintf("%08d",++$num); 
+        $SEQ{$num} = $seqName;
+        $H{$seqName}{'SEQ'} = $$FASTA{$seqName} if ($$FASTA{$seqName});
+        $H{$seqName}{'transmembrane'}{'phobius'}{'NUM'} = 0;
+        $H{$seqName}{'topology'}{'phobius'}{'LOC'} = 'Non-Cytoplasmic';
+        next;
+      } elsif ($l =~ /^FT/) {
+        $H{$seqName}{'transmembrane'}{'phobius'}{'NUM'} += ($l =~ /TRANSMEM/);
+        $H{$seqName}{'topology'}{'phobius'}{'LOC'} = 'Cytoplasmic' if ($l !~ /NON CYTOPLASMIC/);
+      }
+    }
+    close(IN);
+  }
+  YAML::XS::DumpFile($outF,\%H);
+  YAML::XS::DumpFile($seqF,\%SEQ);
+  return;
+}
+
+sub topcons::parse {
+  my($self,$srcD,$outF,$seqF,$all,$FASTA)=@_;
+  my(%H);
+  foreach my $f (glob("$srcD/${self}*")) {
+    next unless (-f $f);
+    my $data = Utils::loadFromFile($f);
+    foreach my $blk (split(/Sequence name:\s+/,$data)) {
+      my($seqName) = split(/\s+/,$blk); 
+#      next unless ($seqName eq 'sp|P04710|ADT1_YEAST'); # DEBUG
+      $H{$seqName}{'SEQ'} = $$FASTA{$seqName} if ($$FASTA{$seqName});
+      next if ($seqName =~ /#+/);
+      foreach my $sfwr (qw(TOPCONS OCTOPUS Philius PolyPhobius SCAMPI SPOCTOPUS)) {
+        my $sfwrLC = lc($sfwr); if ($sfwrLC eq 'philius') { $sfwrLC = 'philiusTC'};
+        $H{$seqName}{'transmembrane'}{$sfwrLC}{'NUM'} = 0;
+        my($BLK) = $blk =~ /${sfwr} predicted topology:\s+(.+)?\s/;
+        $H{$seqName}{'topology'}{$sfwrLC}{'FST'} = substr($BLK,0,1);
+        my($startTM,$endTM,$idx,$tmDomain); 
+        while ($idx > -1) {
+          $idx = index($BLK,'M',$endTM);
+          if ($idx > -1) {
+            $tmDomain++;
+            $endTM = $idx; $startTM = $idx + 1;
+            while(substr($BLK,$endTM,1) eq 'M') { $endTM++ } 
+            $H{$seqName}{'transmembrane'}{$sfwrLC}{'TM'}{$tmDomain}{'FROM'} = $startTM;
+            $H{$seqName}{'transmembrane'}{$sfwrLC}{'TM'}{$tmDomain}{'TO'} = $endTM;
+            if ($H{$seqName}{'SEQ'}) {
+              $H{$seqName}{'transmembrane'}{$sfwrLC}{'TM'}{$tmDomain}{'SEQ'} = substr($H{$seqName}{'SEQ'},$startTM - 1,$endTM - $startTM );
+              $H{$seqName}{'transmembrane'}{$sfwrLC}{'TM'}{$tmDomain}{'CYS'} = $H{$seqName}{'transmembrane'}{$sfwrLC}{'TM'}{$tmDomain}{'SEQ'} =~ tr/C/C/;
+              $H{$seqName}{'transmembrane'}{$sfwrLC}{'CYS'} += ($H{$seqName}{'transmembrane'}{$sfwrLC}{'TM'}{$tmDomain}{'CYS'} > 0);
+           }
+          }          
+        }
+        $H{$seqName}{'transmembrane'}{$sfwrLC}{'NUM'} = $tmDomain;
+      }
+      (undef,my $rty) = split(/Predicted TOPCONS reliability/,$blk);
+      foreach my $rtyL (split(/\n/,$rty)) {
+        next unless ($rtyL =~ /^\d/);
+        ($H{$seqName}{'topology'}{'topcons'}{'confidence'}) = $rtyL =~ /\d+\s+([\d\.]+)/;
+        last;
+      }
+    }
+  }
+  YAML::XS::DumpFile($outF,\%H);
+  return;
+}
+
+sub hmmtop::parse {
+  my($self,$srcD,$outF,$seqF,$all,$FASTA)=@_;
+  my(%H,%SEQ,$num,$startTM,$endTM);
+  foreach my $f (glob("$srcD/${self}*")) {
+    next unless (-f $f);
+    local(*IN); open(IN,$f);
+    while(my $l = <IN>) {
+      next if ($l =~ /^ *$/); 
+      my($seqName,$topology,$numTMdomains,@a) = split(/\t/,$l);
+      $H{$seqName}{'SEQ'} = $$FASTA{$seqName} if ($$FASTA{$seqName});
+      $H{$seqName}{'topology'}{'hmmtop'}{'LOC'} = $topology;
+      $H{$seqName}{'transmembrane'}{'hmmtop'}{'NUM'} = $numTMdomains;
+      foreach my $tmDomain (1 .. $numTMdomains) {
+        $startTM = shift(@a);
+        $endTM = shift(@a);
+        $H{$seqName}{'transmembrane'}{'hmmtop'}{'TM'}{$tmDomain}{'FROM'} = $startTM;
+        $H{$seqName}{'transmembrane'}{'hmmtop'}{'TM'}{$tmDomain}{'TO'} = $endTM;
+        if ($H{$seqName}{'SEQ'}) {
+          $H{$seqName}{'transmembrane'}{'hmmtop'}{'TM'}{$tmDomain}{'SEQ'} = substr($H{$seqName}{'SEQ'},$startTM - 1,$endTM - $startTM + 1);
+          $H{$seqName}{'transmembrane'}{'hmmtop'}{'TM'}{$tmDomain}{'CYS'} = $H{$seqName}{'transmembrane'}{'hmmtop'}{'TM'}{$tmDomain}{'SEQ'} =~ tr/C/C/;
+          $H{$seqName}{'transmembrane'}{'hmmtop'}{'CYS'} += ($H{$seqName}{'transmembrane'}{'hmmtop'}{'TM'}{$tmDomain}{'CYS'} > 0);
+        }
+      }
+    }
+    close(IN);
+  }
+  YAML::XS::DumpFile($outF,\%H);
+  return;
+}
+
+sub loadSubset {
+  my($idsF,$SUBSET)=@_;
+  local(*IN); open(IN,$idsF);
+  while(my $l=<IN>) {
+    Utils::trim(\$l);
+    foreach my $id (split(/\s/,$l)) { $$SUBSET{$id}++;}
+  }
+  close(IN);
+  return;
+}
+
+sub loadFasta {
+  my($fastaF,$FASTA)=@_;
+  local(*IN); open(IN,$fastaF);
+  my($seqname,$seq);
+  while(my $l=<IN>) {
+    Utils::trim(\$l);
+    if ($l=~ /^>/) {
+      if ($seqname and $seq) { $$FASTA{$seqname} = $seq; $seqname = $seq = undef; }
+      $l =~ s/^>//; ($seqname) = split(/\s+/,$l);
+    } else {
+      $seq .= $l;
+    }
+  }
+  close(IN);
+  if ($seqname and $seq) { $$FASTA{$seqname} = $seq; $seqname = $seq = undef; }
+  return;
+}
+
+sub giveHelp {
+print qq {\n$0 version $VERSION
+    -debug      debug mode
+    -fas        text file with fasta formatted sequences
+    -help       this help
+    -ids        text file with seqs id to process, default all
+    -report     generate report
+    -verbose    verbose
+\n}; exit;
+}
+
